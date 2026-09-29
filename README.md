@@ -94,6 +94,14 @@ clock -- and then beeps for two seconds if there is a card to beep on. It exits
 0 whether or not there is one, and non-zero only if a check was wrong, so it is
 the thing to run in CI.
 
+`smolalsa_play [-d dev] [-r rate] [-c channels] [-p period-frames] [-n periods]
+(-t freq-hz [-s seconds] [-a amplitude-0-100] | file.wav | -R file.raw)` plays
+a tone, a 16 bit WAV or raw signed 16 bit samples. A WAV brings its own rate and
+channel count unless `-r` or `-c` say otherwise. It prints what the card agreed
+to, where it has got to every second, and finishes with `frames`, `elapsed ms`,
+`expected ms` and `xruns`: elapsed against expected is how the card's pacing is
+checked, since the two should be within a period or so of each other.
+
 ## Building it
 
 Both builds are `smolcommon.mk`'s. `make` on its own builds all five against
