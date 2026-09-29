@@ -6,6 +6,10 @@
 #include <stdio.h>
 #endif
 
+#define RATE		22050
+#define PERIOD		512
+#define PERIODS		4
+
 static unsigned int failures;
 
 /* A failed check is a line number and a condition, and the run carries on */
@@ -105,6 +109,16 @@ static void check_params(void)
 	CHECK(smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE) == 1024);
 }
 
+/* Nothing there is its own answer, and it leaves nothing open */
+static void check_nodevice(void)
+{
+	struct smolalsa_pcm pcm;
+
+	CHECK(smolalsa_open(&pcm, "/dev/snd/smolalsa-no-such-card", RATE, 1, PERIOD,
+			    PERIODS) == SMOLALSA_NODEVICE);
+	CHECK(pcm.fd == -1);
+}
+
 int main(int argc, char **argv, char **envp)
 {
 	(void)argc;
@@ -113,6 +127,7 @@ int main(int argc, char **argv, char **envp)
 
 	check_ioctls();
 	check_params();
+	check_nodevice();
 
 	if (failures) {
 		printf("%u checks failed\n", failures);
