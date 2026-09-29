@@ -4,11 +4,13 @@
 
 #ifndef NOLIBC
 #include <stdio.h>
+#include <time.h>
 #endif
 
 #define RATE		22050
 #define PERIOD		512
 #define PERIODS		4
+#define SECONDS		2
 
 static unsigned int failures;
 
@@ -121,10 +123,27 @@ static void check_nodevice(void)
 	CHECK(smolalsa_write(&pcm, "xx", 1) == 0);
 }
 
+/* A square wave that fades, which is a beep and needs no arithmetic */
+static void fill(int16_t *frames, unsigned int n, unsigned int at, unsigned int total)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		unsigned int t = at + i;
+		unsigned int period = RATE / 440;	/* an A, near enough */
+		int level = (int)(32767 - (32767 * (long)t) / total);
+
+		frames[i] = (int16_t)((t % period) < period / 2 ? level : -level);
+	}
+}
+
 int main(int argc, char **argv, char **envp)
 {
-	(void)argc;
-	(void)argv;
+	struct smolalsa_pcm pcm;
+	static int16_t frames[PERIOD];
+	unsigned int total = RATE * SECONDS, at = 0;
+	int ret;
+
 	(void)envp;
 
 	check_ioctls();
@@ -137,6 +156,40 @@ int main(int argc, char **argv, char **envp)
 	}
 
 	printf("the structures and the parameter helpers check out\n");
+
+	ret = smolalsa_open(&pcm, argc > 1 ? argv[1] : NULL, RATE, 1, PERIOD, PERIODS);
+	if (ret) {
+		printf("no sound here (%d), which is not fatal\n", ret);
+		return 0;
+	}
+
+	printf("beeping for %u seconds at %uHz\n", (unsigned int)SECONDS, (unsigned int)RATE);
+
+	while (at < total) {
+		unsigned int want = total - at < PERIOD ? total - at : PERIOD;
+
+		fill(frames, want, at, total);
+
+		ret = smolalsa_write(&pcm, frames, want);
+		if (ret < 0) {
+			printf("stopped: %d\n", ret);
+			break;
+		}
+
+		/* Nothing went in, so the card is full: wait rather than spin */
+		if (ret == 0) {
+			struct timespec nap = { 0, 10 * 1000 * 1000 };
+
+			nanosleep(&nap, NULL);
+			continue;
+		}
+
+		at += (unsigned int)ret;
+	}
+
+	printf("beeped %u frames, ran dry %u times\n", at, smolalsa_xruns(&pcm));
+
+	smolalsa_close(&pcm);
 
 	return 0;
 }
