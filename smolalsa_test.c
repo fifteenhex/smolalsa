@@ -43,6 +43,68 @@ static void check_ioctls(void)
 	       (unsigned int)sizeof(struct snd_ctl_elem_info));
 }
 
+/* Saying yes to everything, then narrowing it down to one thing at a time */
+static void check_params(void)
+{
+	struct snd_pcm_hw_params hw;
+	unsigned int i, w, ones = 0;
+
+	smolalsa_anything(&hw);
+
+	for (i = SNDRV_PCM_HW_PARAM_FIRST_MASK; i <= SNDRV_PCM_HW_PARAM_LAST_MASK; i++) {
+		struct snd_mask *mask = smolalsa_mask(&hw, (int)i);
+
+		for (w = 0; w < sizeof(mask->bits) / sizeof(mask->bits[0]); w++)
+			if (mask->bits[w] == ~0u)
+				ones++;
+	}
+	CHECK(ones == 3 * (SNDRV_MASK_MAX / 32));
+	CHECK(hw.rmask == ~0u);
+	CHECK(hw.cmask == 0);
+
+	for (i = SNDRV_PCM_HW_PARAM_FIRST_INTERVAL; i <= SNDRV_PCM_HW_PARAM_LAST_INTERVAL;
+	     i++) {
+		struct snd_interval *interval = smolalsa_interval(&hw, (int)i);
+
+		CHECK(interval->min == 0);
+		CHECK(interval->max == ~0u);
+		CHECK(interval->openmin == 0 && interval->openmax == 0);
+		CHECK(interval->integer == 0 && interval->empty == 0);
+	}
+
+	/* a pick lands in the right mask, on the right bit, and on nothing else */
+	smolalsa_pick(&hw, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
+	CHECK(smolalsa_picked(&hw, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE));
+	CHECK(!smolalsa_picked(&hw, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S32_LE));
+	CHECK(hw.masks[SNDRV_PCM_HW_PARAM_FORMAT - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] ==
+	      1u << SNDRV_PCM_FORMAT_S16_LE);
+	/* and leaves the other two masks alone */
+	CHECK(smolalsa_picked(&hw, SNDRV_PCM_HW_PARAM_ACCESS,
+			      SNDRV_PCM_ACCESS_RW_INTERLEAVED));
+	CHECK(smolalsa_picked(&hw, SNDRV_PCM_HW_PARAM_SUBFORMAT, SNDRV_PCM_SUBFORMAT_STD));
+
+	/* a format above 64 is a different word of the mask, not a lost bit */
+	smolalsa_pick(&hw, SNDRV_PCM_HW_PARAM_FORMAT, 200);
+	CHECK(smolalsa_picked(&hw, SNDRV_PCM_HW_PARAM_FORMAT, 200));
+	CHECK(hw.masks[SNDRV_PCM_HW_PARAM_FORMAT -
+		       SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[200 / 32] == 1u << (200 % 32));
+
+	/* exactly is one value and says so; at least is a floor and does not */
+	smolalsa_exactly(&hw, SNDRV_PCM_HW_PARAM_RATE, 44100);
+	CHECK(smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_RATE) == 44100);
+	CHECK(smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_RATE)->integer);
+
+	smolalsa_atleast(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, 256);
+	CHECK(smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->min == 256);
+	CHECK(smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->max == ~0u);
+	CHECK(smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE) == 0);
+
+	/* what a card that narrowed it without setting the flag hands back */
+	smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->max = 1024;
+	smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->min = 1024;
+	CHECK(smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE) == 1024);
+}
+
 int main(int argc, char **argv, char **envp)
 {
 	(void)argc;
@@ -50,13 +112,14 @@ int main(int argc, char **argv, char **envp)
 	(void)envp;
 
 	check_ioctls();
+	check_params();
 
 	if (failures) {
 		printf("%u checks failed\n", failures);
 		return 1;
 	}
 
-	printf("the structures check out\n");
+	printf("the structures and the parameter helpers check out\n");
 
 	return 0;
 }
