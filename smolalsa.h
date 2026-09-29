@@ -550,4 +550,26 @@ static inline void smolalsa_tone_fill(struct smolalsa_tone *tone, int16_t *frame
 	}
 }
 
+/* Time in whole milliseconds off the monotonic clock */
+static inline unsigned long smolalsa_now_ms(void)
+{
+	struct timespec now = { 0, 0 };
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	return (unsigned long)now.tv_sec * 1000ul + (unsigned long)(now.tv_nsec / 1000000);
+}
+
+/*
+ * How long a number of frames lasts. Multiplying by a thousand first would wrap
+ * a 32 bit long after about 89 seconds at 48k, so the division is split.
+ */
+static inline unsigned long smolalsa_frames_ms(unsigned int rate, unsigned long frames)
+{
+	if (!rate)
+		return 0;
+
+	return (frames / rate) * 1000ul + (frames % rate) * 1000ul / rate;
+}
+
 #endif /* _SMOLALSA_H */
