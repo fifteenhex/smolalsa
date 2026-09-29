@@ -31,6 +31,11 @@
 #define SMOLALSA_DEVICEPATH	"/dev/snd/pcmC0D0p"
 #endif
 
+/* How long the blocking helpers will sit on a card before giving up on it */
+#ifndef SMOLALSA_WAITMS
+#define SMOLALSA_WAITMS		1000
+#endif
+
 /* A card that is there but busy is worth knowing from one that is not */
 #define SMOLALSA_NODEVICE	(-1)
 #define SMOLALSA_BUSY		(-2)
@@ -283,6 +288,66 @@ static inline int smolalsa_write(struct smolalsa_pcm *pcm, const void *frames,
 	}
 
 	return (int)xfer.result;
+}
+
+/*
+ * Wait for room for a period, or a period to hand over: 1 when there is
+ * something to do, 0 on the timeout, -errno if the wait itself failed. For
+ * programs with nothing else to do meanwhile -- one with a frame to draw
+ * should write what fits, draw, and come back.
+ */
+static inline int smolalsa_wait(struct smolalsa_pcm *pcm, int timeoutms)
+{
+	struct pollfd pfd;
+	int ret;
+
+	if (pcm->fd < 0)
+		return 0;
+
+	pfd.fd = pcm->fd;
+	pfd.events = POLLOUT;
+	pfd.revents = 0;
+
+	do {
+		ret = poll(&pfd, 1, timeoutms);
+	} while (ret < 0 && errno == EINTR);
+
+	if (ret < 0)
+		return -errno;
+
+	return ret ? 1 : 0;
+}
+
+/*
+ * Hand over the lot, waiting on the card in between. A card that has had no
+ * room for a whole second is stuck, and saying so beats waiting for ever.
+ */
+static inline int smolalsa_write_all(struct smolalsa_pcm *pcm, const void *frames,
+				     unsigned int nframes)
+{
+	const unsigned char *at = frames;
+	unsigned int done = 0;
+
+	while (done < nframes) {
+		int ret = smolalsa_write(pcm, at + (unsigned long)done * pcm->framebytes,
+					 nframes - done);
+
+		if (ret < 0)
+			return ret;
+
+		if (!ret) {
+			ret = smolalsa_wait(pcm, SMOLALSA_WAITMS);
+			if (ret < 0)
+				return ret;
+			if (!ret)
+				return -ETIMEDOUT;
+			continue;
+		}
+
+		done += (unsigned int)ret;
+	}
+
+	return (int)done;
 }
 
 /* Times the card has run dry, or over, since it was opened */

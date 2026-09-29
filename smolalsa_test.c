@@ -121,6 +121,7 @@ static void check_nodevice(void)
 	CHECK(pcm.fd == -1);
 	/* and writing to what never opened is nothing written, not a crash */
 	CHECK(smolalsa_write(&pcm, "xx", 1) == 0);
+	CHECK(smolalsa_wait(&pcm, 0) == 0);
 }
 
 /* A square wave that fades, which is a beep and needs no arithmetic */
