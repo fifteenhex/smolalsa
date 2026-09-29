@@ -31,6 +31,14 @@
 #define SMOLALSA_DEVICEPATH	"/dev/snd/pcmC0D0p"
 #endif
 
+/*
+ * The other two nodes of the same card. No udev here, so these are the names
+ * the kernel makes itself: 116,16 playback, 116,24 capture, 116,0 mixer.
+ */
+#ifndef SMOLALSA_CAPTUREPATH
+#define SMOLALSA_CAPTUREPATH	"/dev/snd/pcmC0D0c"
+#endif
+
 /* How long the blocking helpers will sit on a card before giving up on it */
 #ifndef SMOLALSA_WAITMS
 #define SMOLALSA_WAITMS		1000
@@ -47,6 +55,7 @@ struct smolalsa_pcm {
 	unsigned int framebytes;
 	unsigned int periodframes;
 	unsigned int periods;
+	unsigned int capture;		/* recording rather than playing */
 	unsigned int xruns;		/* times it ran dry, or over */
 	unsigned long boundary;		/* where the pointers wrap */
 };
@@ -178,8 +187,8 @@ static inline int smolalsa_drain(struct smolalsa_pcm *pcm)
 }
 
 /*
- * Open a card for playing, signed 16 bit interleaved, and tell it what to
- * expect.
+ * Open a card, signed 16 bit interleaved, and tell it what to expect. Both
+ * directions come through here.
  *
  * The period is how much the card takes at a time and the number of them is
  * how far ahead it will hold: 512 frames at 22050 with four of them is about
@@ -187,9 +196,10 @@ static inline int smolalsa_drain(struct smolalsa_pcm *pcm)
  * everything in struct smolalsa_pcm is what the kernel chose rather than what
  * was asked for. The fd is non-blocking, since the caller has a frame to draw.
  */
-static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
-				unsigned int rate, unsigned int channels,
-				unsigned int periodframes, unsigned int periods)
+static inline int smolalsa_open_stream(struct smolalsa_pcm *pcm, const char *path,
+				       unsigned int capture, unsigned int rate,
+				       unsigned int channels, unsigned int periodframes,
+				       unsigned int periods)
 {
 	struct snd_pcm_hw_params hw;
 	struct snd_pcm_sw_params sw;
@@ -199,9 +209,9 @@ static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
 	pcm->fd = -1;
 
 	if (!path)
-		path = SMOLALSA_DEVICEPATH;
+		path = capture ? SMOLALSA_CAPTUREPATH : SMOLALSA_DEVICEPATH;
 
-	fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	fd = open(path, (capture ? O_RDONLY : O_WRONLY) | O_NONBLOCK | O_CLOEXEC);
 	if (fd < 0)
 		return errno == EBUSY ? SMOLALSA_BUSY : SMOLALSA_NODEVICE;
 
@@ -222,6 +232,7 @@ static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
 		return ret;
 	}
 
+	pcm->capture = capture ? 1 : 0;
 	pcm->rate = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_RATE);
 	pcm->channels = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_CHANNELS);
 	pcm->periodframes = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
@@ -240,8 +251,11 @@ static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
 	sw.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
 	sw.period_step = 1;
 	sw.avail_min = pcm->periodframes;
-	/* Playing starts once there is a period in */
-	sw.start_threshold = pcm->periodframes;
+	/*
+	 * Playing starts once there is a period in. Recording has nothing
+	 * to wait for, so one frame, or the card never starts at all.
+	 */
+	sw.start_threshold = capture ? 1 : pcm->periodframes;
 	sw.stop_threshold = pcm->periodframes * pcm->periods;
 	sw.silence_threshold = 0;
 	sw.silence_size = 0;
@@ -271,6 +285,22 @@ static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
 	}
 
 	return 0;
+}
+
+/* Open a card for playing */
+static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
+				unsigned int rate, unsigned int channels,
+				unsigned int periodframes, unsigned int periods)
+{
+	return smolalsa_open_stream(pcm, path, 0, rate, channels, periodframes, periods);
+}
+
+/* Open a card for recording, which is the same card and a different node */
+static inline int smolalsa_open_capture(struct smolalsa_pcm *pcm, const char *path,
+					unsigned int rate, unsigned int channels,
+					unsigned int periodframes, unsigned int periods)
+{
+	return smolalsa_open_stream(pcm, path, 1, rate, channels, periodframes, periods);
 }
 
 /*
@@ -309,6 +339,42 @@ static inline int smolalsa_write(struct smolalsa_pcm *pcm, const void *frames,
 }
 
 /*
+ * The same the other way round. The first read is what starts a recording, so
+ * a card that has only just been opened has nothing ready yet. Overrunning is
+ * counted and shrugged off like running dry, since the frames are gone either
+ * way.
+ */
+static inline int smolalsa_read(struct smolalsa_pcm *pcm, void *frames,
+				unsigned int nframes)
+{
+	struct snd_xferi xfer;
+	int ret;
+
+	if (pcm->fd < 0)
+		return 0;
+
+	xfer.buf = frames;
+	xfer.frames = nframes;
+	xfer.result = 0;
+
+	ret = ioctl(pcm->fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xfer);
+	if (ret < 0) {
+		if (errno == EAGAIN)
+			return 0;
+
+		if (errno == EPIPE || errno == ESTRPIPE) {
+			pcm->xruns++;
+			smolalsa_prepare(pcm);
+			return 0;
+		}
+
+		return -errno;
+	}
+
+	return (int)xfer.result;
+}
+
+/*
  * Wait for room for a period, or a period to hand over: 1 when there is
  * something to do, 0 on the timeout, -errno if the wait itself failed. For
  * programs with nothing else to do meanwhile -- one with a frame to draw
@@ -323,7 +389,7 @@ static inline int smolalsa_wait(struct smolalsa_pcm *pcm, int timeoutms)
 		return 0;
 
 	pfd.fd = pcm->fd;
-	pfd.events = POLLOUT;
+	pfd.events = pcm->capture ? POLLIN : POLLOUT;
 	pfd.revents = 0;
 
 	do {
@@ -349,6 +415,35 @@ static inline int smolalsa_write_all(struct smolalsa_pcm *pcm, const void *frame
 	while (done < nframes) {
 		int ret = smolalsa_write(pcm, at + (unsigned long)done * pcm->framebytes,
 					 nframes - done);
+
+		if (ret < 0)
+			return ret;
+
+		if (!ret) {
+			ret = smolalsa_wait(pcm, SMOLALSA_WAITMS);
+			if (ret < 0)
+				return ret;
+			if (!ret)
+				return -ETIMEDOUT;
+			continue;
+		}
+
+		done += (unsigned int)ret;
+	}
+
+	return (int)done;
+}
+
+/* And take the lot, the same way */
+static inline int smolalsa_read_all(struct smolalsa_pcm *pcm, void *frames,
+				    unsigned int nframes)
+{
+	unsigned char *at = frames;
+	unsigned int done = 0;
+
+	while (done < nframes) {
+		int ret = smolalsa_read(pcm, at + (unsigned long)done * pcm->framebytes,
+					nframes - done);
 
 		if (ret < 0)
 			return ret;
