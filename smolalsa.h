@@ -27,6 +27,24 @@
 
 #include <sound/asound.h>
 
+#ifndef SMOLALSA_DEVICEPATH
+#define SMOLALSA_DEVICEPATH	"/dev/snd/pcmC0D0p"
+#endif
+
+/* A card that is there but busy is worth knowing from one that is not */
+#define SMOLALSA_NODEVICE	(-1)
+#define SMOLALSA_BUSY		(-2)
+
+struct smolalsa_pcm {
+	int fd;
+	unsigned int rate;
+	unsigned int channels;
+	unsigned int framebytes;
+	unsigned int periodframes;
+	unsigned int periods;
+	unsigned long boundary;		/* where the pointers wrap */
+};
+
 static inline struct snd_mask *smolalsa_mask(struct snd_pcm_hw_params *params, int which)
 {
 	return &params->masks[which - SNDRV_PCM_HW_PARAM_FIRST_MASK];
@@ -112,6 +130,121 @@ static inline unsigned int smolalsa_chosen(struct snd_pcm_hw_params *params, int
 
 	if (interval->integer || interval->min == interval->max)
 		return interval->max;
+
+	return 0;
+}
+
+static inline void smolalsa_close(struct smolalsa_pcm *pcm)
+{
+	if (pcm->fd >= 0)
+		close(pcm->fd);
+
+	pcm->fd = -1;
+}
+
+#define __smolalsa_cleanup_pcm __attribute__((cleanup(smolalsa_close)))
+
+/* Throw away what is queued and get ready to start again */
+static inline int smolalsa_prepare(struct smolalsa_pcm *pcm)
+{
+	if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_PREPARE, 0) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/*
+ * Open a card for playing, signed 16 bit interleaved, and tell it what to
+ * expect.
+ *
+ * The period is how much the card takes at a time and the number of them is
+ * how far ahead it will hold: 512 frames at 22050 with four of them is about
+ * 90ms of slack. It is asked for as a minimum and read back afterwards, so
+ * everything in struct smolalsa_pcm is what the kernel chose rather than what
+ * was asked for. The fd is non-blocking, since the caller has a frame to draw.
+ */
+static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
+				unsigned int rate, unsigned int channels,
+				unsigned int periodframes, unsigned int periods)
+{
+	struct snd_pcm_hw_params hw;
+	struct snd_pcm_sw_params sw;
+	int fd, ret;
+
+	memset(pcm, 0, sizeof(*pcm));
+	pcm->fd = -1;
+
+	if (!path)
+		path = SMOLALSA_DEVICEPATH;
+
+	fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0)
+		return errno == EBUSY ? SMOLALSA_BUSY : SMOLALSA_NODEVICE;
+
+	smolalsa_anything(&hw);
+	smolalsa_pick(&hw, SNDRV_PCM_HW_PARAM_ACCESS, SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+	smolalsa_pick(&hw, SNDRV_PCM_HW_PARAM_FORMAT, SNDRV_PCM_FORMAT_S16_LE);
+	smolalsa_pick(&hw, SNDRV_PCM_HW_PARAM_SUBFORMAT, SNDRV_PCM_SUBFORMAT_STD);
+	smolalsa_exactly(&hw, SNDRV_PCM_HW_PARAM_SAMPLE_BITS, 16);
+	smolalsa_exactly(&hw, SNDRV_PCM_HW_PARAM_FRAME_BITS, 16 * channels);
+	smolalsa_exactly(&hw, SNDRV_PCM_HW_PARAM_CHANNELS, channels);
+	smolalsa_exactly(&hw, SNDRV_PCM_HW_PARAM_RATE, rate);
+	smolalsa_atleast(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE, periodframes);
+	smolalsa_exactly(&hw, SNDRV_PCM_HW_PARAM_PERIODS, periods);
+
+	if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &hw) < 0) {
+		ret = -errno;
+		close(fd);
+		return ret;
+	}
+
+	pcm->rate = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_RATE);
+	pcm->channels = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_CHANNELS);
+	pcm->periodframes = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
+	pcm->periods = smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIODS);
+	if (!pcm->rate)
+		pcm->rate = rate;
+	if (!pcm->channels)
+		pcm->channels = channels;
+	if (!pcm->periodframes)
+		pcm->periodframes = periodframes;
+	if (!pcm->periods)
+		pcm->periods = periods;
+	pcm->framebytes = 2 * pcm->channels;
+
+	memset(&sw, 0, sizeof(sw));
+	sw.tstamp_mode = SNDRV_PCM_TSTAMP_NONE;
+	sw.period_step = 1;
+	sw.avail_min = pcm->periodframes;
+	/* Playing starts once there is a period in */
+	sw.start_threshold = pcm->periodframes;
+	sw.stop_threshold = pcm->periodframes * pcm->periods;
+	sw.silence_threshold = 0;
+	sw.silence_size = 0;
+
+	/*
+	 * Where the ring counter wraps: a power of two multiple of the
+	 * buffer, as large as will fit. The kernel hands its own back in
+	 * the same call, and that is what the pointers count up to.
+	 */
+	sw.boundary = pcm->periodframes * pcm->periods;
+	while (sw.boundary * 2 < 0x40000000)
+		sw.boundary *= 2;
+
+	if (ioctl(fd, SNDRV_PCM_IOCTL_SW_PARAMS, &sw) < 0) {
+		ret = -errno;
+		close(fd);
+		return ret;
+	}
+	pcm->boundary = (unsigned long)sw.boundary;
+
+	pcm->fd = fd;
+
+	ret = smolalsa_prepare(pcm);
+	if (ret < 0) {
+		smolalsa_close(pcm);
+		return ret;
+	}
 
 	return 0;
 }
