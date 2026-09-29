@@ -716,6 +716,189 @@ static inline int smolalsa_ctl_find(struct smolalsa_ctl *ctl, const char *name,
 	return smolalsa_ctl_find_iface(ctl, SNDRV_CTL_ELEM_IFACE_MIXER, name, 0, elem);
 }
 
+static inline int smolalsa_ctl_read(struct smolalsa_ctl *ctl,
+				    const struct snd_ctl_elem_id *id,
+				    struct snd_ctl_elem_value *value)
+{
+	memset(value, 0, sizeof(*value));
+	value->id = *id;
+
+	if (ioctl(ctl->fd, SNDRV_CTL_IOCTL_ELEM_READ, value) < 0)
+		return -errno;
+
+	return 0;
+}
+
+static inline int smolalsa_ctl_write(struct smolalsa_ctl *ctl,
+				     const struct snd_ctl_elem_id *id,
+				     struct snd_ctl_elem_value *value)
+{
+	value->id = *id;
+
+	if (ioctl(ctl->fd, SNDRV_CTL_IOCTL_ELEM_WRITE, value) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/*
+ * The name of one item of a list element. There is no way to ask for all of
+ * them at once, so a list of four names is four calls.
+ */
+static inline int smolalsa_ctl_item(struct smolalsa_ctl *ctl,
+				    const struct snd_ctl_elem_id *id,
+				    unsigned int item, char *name, unsigned int len)
+{
+	struct snd_ctl_elem_info info;
+	unsigned int n;
+
+	if (!len)
+		return -EINVAL;
+
+	memset(&info, 0, sizeof(info));
+	info.id = *id;
+	info.value.enumerated.item = item;
+
+	if (ioctl(ctl->fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0)
+		return -errno;
+
+	if (info.type != SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+		return -EINVAL;
+
+	if (item >= info.value.enumerated.items)
+		return -ENOENT;
+
+	n = (unsigned int)strlen(info.value.enumerated.name);
+	if (n > len - 1)
+		n = len - 1;
+
+	memcpy(name, info.value.enumerated.name, n);
+	name[n] = 0;
+
+	return 0;
+}
+
+/*
+ * Read an element by name into vals, one per channel. A switch reads back 0 or
+ * 1 and a list reads back which item it is on, so everything that is not a
+ * pile of bytes comes out as a number.
+ */
+static inline int smolalsa_ctl_get(struct smolalsa_ctl *ctl, const char *name,
+				   long *vals, unsigned int max, unsigned int *count)
+{
+	struct snd_ctl_elem_value value;
+	struct smolalsa_ctl_elem elem;
+	unsigned int i, n;
+	int ret;
+
+	if (!max)
+		return -EINVAL;
+
+	ret = smolalsa_ctl_find(ctl, name, &elem);
+	if (ret < 0)
+		return ret;
+
+	ret = smolalsa_ctl_read(ctl, &elem.id, &value);
+	if (ret < 0)
+		return ret;
+
+	n = elem.count > max ? max : elem.count;
+
+	for (i = 0; i < n; i++) {
+		if (elem.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+			vals[i] = (long)value.value.enumerated.item[i];
+		else if (elem.type == SNDRV_CTL_ELEM_TYPE_INTEGER64)
+			vals[i] = (long)value.value.integer64.value[i];
+		else
+			vals[i] = value.value.integer.value[i];
+	}
+
+	if (count)
+		*count = n;
+
+	return 0;
+}
+
+/*
+ * Set every channel of an element to the same thing, which is what a volume on
+ * the command line means. A number out of range is clamped rather than
+ * refused: asking for more than the card has should end up at its loudest.
+ */
+static inline int smolalsa_ctl_set(struct smolalsa_ctl *ctl, const char *name, long val)
+{
+	struct snd_ctl_elem_value value;
+	struct smolalsa_ctl_elem elem;
+	unsigned int i;
+	int ret;
+
+	ret = smolalsa_ctl_find(ctl, name, &elem);
+	if (ret < 0)
+		return ret;
+
+	switch (elem.type) {
+	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
+		val = val ? 1 : 0;
+		break;
+	case SNDRV_CTL_ELEM_TYPE_INTEGER:
+	case SNDRV_CTL_ELEM_TYPE_INTEGER64:
+		if (val < elem.min)
+			val = elem.min;
+		if (val > elem.max)
+			val = elem.max;
+		break;
+	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
+		if (val < 0 || (unsigned int)val >= elem.items)
+			return -EINVAL;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	/* The write carries the whole array, so read first and change what exists */
+	ret = smolalsa_ctl_read(ctl, &elem.id, &value);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < elem.count; i++) {
+		if (elem.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+			value.value.enumerated.item[i] = (unsigned int)val;
+		else if (elem.type == SNDRV_CTL_ELEM_TYPE_INTEGER64)
+			value.value.integer64.value[i] = val;
+		else
+			value.value.integer.value[i] = val;
+	}
+
+	return smolalsa_ctl_write(ctl, &elem.id, &value);
+}
+
+/* Set a list element by the name of the item, since "Mic" is what a person has */
+static inline int smolalsa_ctl_set_item(struct smolalsa_ctl *ctl, const char *name,
+					const char *item)
+{
+	struct smolalsa_ctl_elem elem;
+	char have[64];
+	unsigned int i;
+	int ret;
+
+	ret = smolalsa_ctl_find(ctl, name, &elem);
+	if (ret < 0)
+		return ret;
+
+	if (elem.type != SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+		return -EINVAL;
+
+	for (i = 0; i < elem.items; i++) {
+		ret = smolalsa_ctl_item(ctl, &elem.id, i, have, sizeof(have));
+		if (ret < 0)
+			return ret;
+
+		if (!strcmp(have, item))
+			return smolalsa_ctl_set(ctl, name, (long)i);
+	}
+
+	return -ENOENT;
+}
+
 /* A WAV file. Only 16 bit PCM, since that is what the card is set to. */
 #define SMOLALSA_WAV_HDRSZ	44		/* RIFF, fmt and data, no more */
 
