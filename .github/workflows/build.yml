@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build against the libc here
+        run: make
+
+      # No card on a runner, so this is the half that does not need one. It
+      # only fails if a check was wrong, not if there was nothing to play on.
+      - name: Run the self-test
+        run: ./smolalsa_test.libc.elf
+
+      # nolibc is a handful of headers in the kernel tree, so take those and
+      # nothing else: about 16MB rather than a couple of gigabytes.
+      # nolibc-extensions comes too, since smolcommon.mk includes it.
+      - name: Get nolibc and nolibc-extensions
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/torvalds/linux.git linux
+          git -C linux sparse-checkout set tools/include/nolibc
+          git clone --depth 1 https://github.com/fifteenhex/nolibc-extensions.git
+
+      # A cross prefix even though the target is this machine, and NOPIE=1
+      # because upstream nolibc cannot relocate itself yet.
+      - name: Build against nolibc, statically
+        run: |
+          make SMOL_ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- NOPIE=1 \
+            NOLIBCDIR=$PWD/linux/tools/include/nolibc \
+            NOLIBCEXTDIR=$PWD/nolibc-extensions
+
+      - name: Run the static self-test
+        run: ./smolalsa_test.x86_64.elf
