@@ -117,6 +117,8 @@ static void check_nodevice(void)
 	CHECK(smolalsa_open(&pcm, "/dev/snd/smolalsa-no-such-card", RATE, 1, PERIOD,
 			    PERIODS) == SMOLALSA_NODEVICE);
 	CHECK(pcm.fd == -1);
+	/* and writing to what never opened is nothing written, not a crash */
+	CHECK(smolalsa_write(&pcm, "xx", 1) == 0);
 }
 
 int main(int argc, char **argv, char **envp)

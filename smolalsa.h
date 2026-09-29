@@ -42,6 +42,7 @@ struct smolalsa_pcm {
 	unsigned int framebytes;
 	unsigned int periodframes;
 	unsigned int periods;
+	unsigned int xruns;		/* times it ran dry, or over */
 	unsigned long boundary;		/* where the pointers wrap */
 };
 
@@ -247,6 +248,47 @@ static inline int smolalsa_open(struct smolalsa_pcm *pcm, const char *path,
 	}
 
 	return 0;
+}
+
+/*
+ * Hand over as many frames as will fit and say how many that was, which may be
+ * none. Running dry means the last frame took too long rather than anything
+ * being wrong, so the card is set going again and nothing went in this time.
+ */
+static inline int smolalsa_write(struct smolalsa_pcm *pcm, const void *frames,
+				 unsigned int nframes)
+{
+	struct snd_xferi xfer;
+	int ret;
+
+	if (pcm->fd < 0)
+		return 0;
+
+	xfer.buf = (void *)frames;
+	xfer.frames = nframes;
+	xfer.result = 0;
+
+	ret = ioctl(pcm->fd, SNDRV_PCM_IOCTL_WRITEI_FRAMES, &xfer);
+	if (ret < 0) {
+		if (errno == EAGAIN)
+			return 0;
+
+		if (errno == EPIPE || errno == ESTRPIPE) {
+			pcm->xruns++;
+			smolalsa_prepare(pcm);
+			return 0;
+		}
+
+		return -errno;
+	}
+
+	return (int)xfer.result;
+}
+
+/* Times the card has run dry, or over, since it was opened */
+static inline unsigned int smolalsa_xruns(struct smolalsa_pcm *pcm)
+{
+	return pcm->xruns;
 }
 
 #endif /* _SMOLALSA_H */
