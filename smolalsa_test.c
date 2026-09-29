@@ -4,6 +4,7 @@
 
 #ifndef NOLIBC
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 #endif
 
@@ -109,6 +110,71 @@ static void check_params(void)
 	smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->max = 1024;
 	smolalsa_interval(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->min = 1024;
 	CHECK(smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE) == 1024);
+}
+
+static void check_wav(void)
+{
+	unsigned char buf[128];
+	struct smolalsa_wav wav;
+
+	/* what is written reads back */
+	CHECK(smolalsa_wav_header(buf, 44100, 2, 16, 8000) == SMOLALSA_WAV_HDRSZ);
+	CHECK(smolalsa_wav_parse(buf, SMOLALSA_WAV_HDRSZ, &wav) == 0);
+	CHECK(wav.rate == 44100);
+	CHECK(wav.channels == 2);
+	CHECK(wav.bits == 16);
+	CHECK(wav.format == 1);
+	CHECK(wav.dataoffset == SMOLALSA_WAV_HDRSZ);
+	CHECK(wav.databytes == 8000);
+	CHECK(smolalsa_le32(buf + 4) == 36 + 8000);
+	CHECK(smolalsa_le32(buf + 28) == 44100 * 4);	/* bytes a second */
+	CHECK(smolalsa_le16(buf + 32) == 4);		/* bytes a frame */
+
+	/*
+	 * A file with something between fmt and data, of an odd length so there
+	 * is a pad byte after it as well, which is the case that catches anyone
+	 * who assumed the samples start at 44.
+	 */
+	memset(buf, 0, sizeof(buf));
+	memcpy(buf, "RIFF", 4);
+	smolalsa_putle32(buf + 4, 100);
+	memcpy(buf + 8, "WAVE", 4);
+	memcpy(buf + 12, "fmt ", 4);
+	smolalsa_putle32(buf + 16, 16);
+	smolalsa_putle16(buf + 20, 1);
+	smolalsa_putle16(buf + 22, 1);
+	smolalsa_putle32(buf + 24, 8000);
+	smolalsa_putle32(buf + 28, 16000);
+	smolalsa_putle16(buf + 32, 2);
+	smolalsa_putle16(buf + 34, 16);
+	memcpy(buf + 36, "LIST", 4);
+	smolalsa_putle32(buf + 40, 5);
+	memcpy(buf + 44, "INFOx", 5);
+	memcpy(buf + 50, "data", 4);
+	smolalsa_putle32(buf + 54, 64);
+	CHECK(smolalsa_wav_parse(buf, sizeof(buf), &wav) == 0);
+	CHECK(wav.rate == 8000);
+	CHECK(wav.channels == 1);
+	CHECK(wav.dataoffset == 58);
+	CHECK(wav.databytes == 64);
+
+	/* a size of all ones means the writer did not know either */
+	smolalsa_putle32(buf + 54, ~0u);
+	CHECK(smolalsa_wav_parse(buf, sizeof(buf), &wav) == 0);
+	CHECK(wav.databytes == 0);
+
+	/* eight bit is not something the card is set up for */
+	smolalsa_putle16(buf + 34, 8);
+	CHECK(smolalsa_wav_parse(buf, sizeof(buf), &wav) < 0);
+	smolalsa_putle16(buf + 34, 16);
+
+	/* and nothing that is not a WAV gets halfway through */
+	CHECK(smolalsa_wav_parse(buf, 4, &wav) < 0);
+	memcpy(buf, "RIFX", 4);
+	CHECK(smolalsa_wav_parse(buf, sizeof(buf), &wav) < 0);
+	memcpy(buf, "RIFF", 4);
+	memcpy(buf + 50, "datb", 4);
+	CHECK(smolalsa_wav_parse(buf, sizeof(buf), &wav) < 0);
 }
 
 static void check_sine(void)
@@ -245,6 +311,7 @@ int main(int argc, char **argv, char **envp)
 
 	check_ioctls();
 	check_params();
+	check_wav();
 	check_sine();
 	check_time();
 	check_nodevice();
@@ -254,7 +321,7 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	}
 
-	printf("the structures, the parameter helpers, the sine and the clock check out\n");
+	printf("the structures, the WAV header, the sine and the clock all check out\n");
 
 	ret = smolalsa_open(&pcm, argc > 1 ? argv[1] : NULL, RATE, 1, PERIOD, PERIODS);
 	if (ret) {
