@@ -146,6 +146,21 @@ hold more than one target at a time. Add `UAPIDIR="/path/to/uapi/include"` when
 the target's kernel headers are not this machine's. `V=1` prints the command
 lines.
 
+## The tarball
+
+Passing `TARWAK` as well packs the stripped binaries into `smolalsa.<arch>.tar`
+as `/bin/smolalsa_*`, ready to unpack over a rootfs. `rootfs.tarwak.json` is the
+layout; `TARWAK_FEATURES=devnodes` adds `/dev/snd` with the three nodes as
+well, since the machine this is aimed at has no udev to make them:
+
+```
+make SMOL_ARCH=x86_64 CROSS_COMPILE=x86_64-linux-gnu- NOPIE=1 \
+     NOLIBCDIR=/path/to/linux/tools/include/nolibc \
+     NOLIBCEXTDIR=/path/to/nolibc-extensions \
+     TARWAK=/path/to/tarwak \
+     TARWAK_FEATURES=devnodes
+```
+
 sound/asound.h is the kernel's own header and it reaches for the libc's time.h
 on the way past, which nolibc disagrees with, so those includes are held off.
 Only the status structures have a time in them, and with nolibc's struct

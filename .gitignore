@@ -2,3 +2,4 @@
 *.elf
 *.elf.dbg
 .buildmode.*
+*.tar

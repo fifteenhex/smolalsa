@@ -1,0 +1,49 @@
+{
+	"defaults": {
+		"user": "root",
+		"group": "root"
+	},
+	"root": {
+		"entities": {
+			"bin": {
+				"type": "dir",
+				"mode": "0555",
+				"defaults": {
+					"mode": "0555"
+				},
+				"entities": {
+					"smolalsa_test": { },
+					"smolalsa_play": { },
+					"smolalsa_rec": { },
+					"smolalsa_ctl": { },
+					"smolalsa_mod": { }
+				}
+			},
+			"dev/snd": {
+				"type": "dir",
+				"mode": "0755",
+				"feature": "devnodes",
+				"defaults": {
+					"mode": "0660"
+				},
+				"entities": {
+					"controlC0": {
+						"type": "char",
+						"major": 116,
+						"minor": 0
+					},
+					"pcmC0D0p": {
+						"type": "char",
+						"major": 116,
+						"minor": 16
+					},
+					"pcmC0D0c": {
+						"type": "char",
+						"major": 116,
+						"minor": 24
+					}
+				}
+			}
+		}
+	}
+}
