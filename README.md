@@ -108,6 +108,11 @@ second it says the loudest sample of that second and a checksum of everything
 so far, which is what tells a quiet room from a dead input, and it ends with
 the same timing line.
 
+`smolalsa_ctl [-d dev] [list | get NAME | set NAME VALUE]` lists what the card
+lets you change, with its type, how many values it has, where it is now and
+what else it could be; and sets one by name from a number, `on`/`off`, or the
+name of a list item.
+
 ## Building it
 
 Both builds are `smolcommon.mk`'s. `make` on its own builds all five against

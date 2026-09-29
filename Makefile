@@ -1,4 +1,4 @@
-PROGS := smolalsa_test smolalsa_play smolalsa_rec
+PROGS := smolalsa_test smolalsa_play smolalsa_rec smolalsa_ctl
 
 HEADERS += smolalsa.h
 
