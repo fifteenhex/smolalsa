@@ -447,6 +447,133 @@ static inline unsigned int smolalsa_xruns(struct smolalsa_pcm *pcm)
 	return pcm->xruns;
 }
 
+/* A WAV file. Only 16 bit PCM, since that is what the card is set to. */
+#define SMOLALSA_WAV_HDRSZ	44		/* RIFF, fmt and data, no more */
+
+struct smolalsa_wav {
+	unsigned int format;		/* 1 is plain PCM, 0xfffe is extensible */
+	unsigned int channels;
+	unsigned int rate;
+	unsigned int bits;
+	unsigned int dataoffset;	/* bytes from the start of the file */
+	unsigned int databytes;		/* 0 when the file does not say */
+};
+
+static inline unsigned int smolalsa_le16(const unsigned char *at)
+{
+	return (unsigned int)at[0] | ((unsigned int)at[1] << 8);
+}
+
+static inline unsigned int smolalsa_le32(const unsigned char *at)
+{
+	return (unsigned int)at[0] | ((unsigned int)at[1] << 8) |
+	       ((unsigned int)at[2] << 16) | ((unsigned int)at[3] << 24);
+}
+
+static inline void smolalsa_putle16(unsigned char *at, unsigned int value)
+{
+	at[0] = (unsigned char)(value & 0xff);
+	at[1] = (unsigned char)((value >> 8) & 0xff);
+}
+
+static inline void smolalsa_putle32(unsigned char *at, unsigned int value)
+{
+	at[0] = (unsigned char)(value & 0xff);
+	at[1] = (unsigned char)((value >> 8) & 0xff);
+	at[2] = (unsigned char)((value >> 16) & 0xff);
+	at[3] = (unsigned char)((value >> 24) & 0xff);
+}
+
+/*
+ * Walk the chunks in the front of a WAV and pick out the format and where the
+ * samples start. What is between fmt and data is usually a name or a
+ * timestamp, so it has to be stepped over rather than assumed away.
+ *
+ * A file being written as it is played puts nothing, or all ones, in the data
+ * size; both come back as zero, meaning read until the file ends.
+ */
+static inline int smolalsa_wav_parse(const void *buf, unsigned int len,
+				     struct smolalsa_wav *wav)
+{
+	const unsigned char *at = buf;
+	unsigned int off = 12, gotfmt = 0;
+
+	if (len < 12)
+		return -EINVAL;
+
+	if (memcmp(at, "RIFF", 4) || memcmp(at + 8, "WAVE", 4))
+		return -EINVAL;
+
+	memset(wav, 0, sizeof(*wav));
+
+	while (off + 8 <= len) {
+		const unsigned char *id = at + off;
+		unsigned int size = smolalsa_le32(at + off + 4);
+		unsigned int body = off + 8;
+
+		if (!memcmp(id, "fmt ", 4)) {
+			if (size < 16 || body + 16 > len)
+				return -EINVAL;
+
+			wav->format = smolalsa_le16(at + body);
+			wav->channels = smolalsa_le16(at + body + 2);
+			wav->rate = smolalsa_le32(at + body + 4);
+			wav->bits = smolalsa_le16(at + body + 14);
+			gotfmt = 1;
+		} else if (!memcmp(id, "data", 4)) {
+			if (!gotfmt)
+				return -EINVAL;
+
+			wav->dataoffset = body;
+			wav->databytes = size == ~0u ? 0 : size;
+
+			if (wav->format != 1 && wav->format != 0xfffe)
+				return -EINVAL;
+
+			if (wav->bits != 16 || !wav->channels || !wav->rate)
+				return -EINVAL;
+
+			return 0;
+		}
+
+		/* chunks are padded to an even length */
+		off = body + size + (size & 1);
+		if (off <= body)
+			return -EINVAL;
+	}
+
+	return -EINVAL;
+}
+
+/*
+ * Write the 44 byte header of a plain 16 bit WAV. Recording does not know the
+ * size until it stops, so put zero in and write it again over the top at the
+ * end.
+ */
+static inline unsigned int smolalsa_wav_header(unsigned char *hdr, unsigned int rate,
+					       unsigned int channels, unsigned int bits,
+					       unsigned int databytes)
+{
+	unsigned int block = channels * (bits / 8);
+
+	memset(hdr, 0, SMOLALSA_WAV_HDRSZ);
+	memcpy(hdr, "RIFF", 4);
+	smolalsa_putle32(hdr + 4, 36 + databytes);
+	memcpy(hdr + 8, "WAVE", 4);
+	memcpy(hdr + 12, "fmt ", 4);
+	smolalsa_putle32(hdr + 16, 16);
+	smolalsa_putle16(hdr + 20, 1);			/* plain PCM */
+	smolalsa_putle16(hdr + 22, channels);
+	smolalsa_putle32(hdr + 24, rate);
+	smolalsa_putle32(hdr + 28, rate * block);	/* bytes a second */
+	smolalsa_putle16(hdr + 32, block);
+	smolalsa_putle16(hdr + 34, bits);
+	memcpy(hdr + 36, "data", 4);
+	smolalsa_putle32(hdr + 40, databytes);
+
+	return SMOLALSA_WAV_HDRSZ;
+}
+
 /*
  * A sine, for a test tone. nolibc has no floating point, so it is a table: a
  * quarter of a wave in 256 steps plus the end of it, 32767 * sin(k * pi / 512)
