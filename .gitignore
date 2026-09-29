@@ -1,0 +1,4 @@
+*.o
+*.elf
+*.elf.dbg
+.buildmode.*
