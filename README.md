@@ -113,6 +113,16 @@ lets you change, with its type, how many values it has, where it is now and
 what else it could be; and sets one by name from a number, `on`/`off`, or the
 name of a list item.
 
+`smolalsa_mod [-d dev] [-r rate] [-s seconds] [-l] file.mod ...` plays
+ProTracker modules: four, six or eight Amiga channels mixed into stereo 16 bit
+with nothing but integer arithmetic, since nolibc has no floating point to
+offer. The usual effects are there -- arpeggio, portamento, vibrato, tremolo,
+sample offset, volume slides, jumps, breaks, the E commands that matter and
+speed and tempo. `-l` plays the list round and round, which is what a box left
+on overnight wants, and `-s` stops after so many seconds. It says how many
+frames went out in how many milliseconds at the end, so a card that plays fast
+or slow shows up as a number rather than a feeling.
+
 ## Building it
 
 Both builds are `smolcommon.mk`'s. `make` on its own builds all five against
