@@ -111,6 +111,83 @@ static void check_params(void)
 	CHECK(smolalsa_chosen(&hw, SNDRV_PCM_HW_PARAM_PERIOD_SIZE) == 1024);
 }
 
+static void check_sine(void)
+{
+	struct smolalsa_tone tone;
+	int16_t frames[1024];
+	unsigned int i;
+	long sum = 0;
+	int peak = 0;
+
+	/* the quarter wave climbs from nothing to full scale and never dips */
+	CHECK(smolalsa_sine_quarter[0] == 0);
+	CHECK(smolalsa_sine_quarter[SMOLALSA_SINE_QUARTER] == 32767);
+	for (i = 0; i < SMOLALSA_SINE_QUARTER; i++)
+		CHECK(smolalsa_sine_quarter[i] <= smolalsa_sine_quarter[i + 1]);
+
+	/* the four corners of the cycle */
+	CHECK(smolalsa_sine(0) == 0);
+	CHECK(smolalsa_sine(16384) == 32767);
+	CHECK(smolalsa_sine(32768) == 0);
+	CHECK(smolalsa_sine(49152) == -32767);
+
+	/* half a cycle on is the same upside down, whatever the phase */
+	for (i = 1; i < 32768; i += 137)
+		CHECK(smolalsa_sine(i) == -smolalsa_sine(i + 32768));
+
+	/*
+	 * And each quarter mirrors the one before it, on table points only: 64
+	 * of phase is one step of the 1024 and anything between two steps takes
+	 * the lower one, so any other phase mirrors onto its neighbour.
+	 */
+	for (i = 0; i < SMOLALSA_SINE_POINTS / 2; i++)
+		CHECK(smolalsa_sine(i * 64) ==
+		      smolalsa_sine((SMOLALSA_SINE_POINTS / 2 - i) * 64));
+
+	/* a sine and a cosine still square up to one, in whole numbers */
+	for (i = 0; i < 65536; i += 521) {
+		int s = smolalsa_sine(i), c = smolalsa_sine(i + 16384);
+		long r = ((long)s * s + (long)c * c) >> 15;
+
+		CHECK(r > 32700 && r < 32800);
+	}
+
+	/* a kilohertz at 48k is 48 frames a cycle */
+	smolalsa_tone_init(&tone, 48000, 1000, 100);
+	CHECK(tone.step == (1000 * 65536) / 48000);
+	CHECK(tone.level == 32767);
+	smolalsa_tone_fill(&tone, frames, 48, 1);
+	CHECK(frames[0] == 0);
+	for (i = 0; i < 48; i++) {
+		if (frames[i] > peak)
+			peak = frames[i];
+		if (-frames[i] > peak)
+			peak = -frames[i];
+		sum += frames[i];
+	}
+	CHECK(peak > 32000);			/* it gets all the way up */
+	CHECK(sum > -1000 && sum < 1000);	/* and is not sitting off centre */
+
+	/* half as loud is half as far, and both channels get the same */
+	smolalsa_tone_init(&tone, 48000, 1000, 50);
+	CHECK(tone.level == 16383);
+	smolalsa_tone_fill(&tone, frames, 24, 2);
+	peak = 0;
+	for (i = 0; i < 48; i += 2) {
+		CHECK(frames[i] == frames[i + 1]);
+		if (frames[i] > peak)
+			peak = frames[i];
+	}
+	CHECK(peak > 16000 && peak <= 16383);
+
+	/* and the phase stays inside one cycle however long it runs */
+	smolalsa_tone_init(&tone, 8000, 3000, 100);
+	for (i = 0; i < 10000; i++) {
+		smolalsa_tone_fill(&tone, frames, 1, 1);
+		CHECK(tone.phase <= 0xffff);
+	}
+}
+
 /* Nothing there is its own answer, and it leaves nothing open */
 static void check_nodevice(void)
 {
@@ -150,6 +227,7 @@ int main(int argc, char **argv, char **envp)
 
 	check_ioctls();
 	check_params();
+	check_sine();
 	check_nodevice();
 
 	if (failures) {
@@ -157,7 +235,7 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	}
 
-	printf("the structures and the parameter helpers check out\n");
+	printf("the structures, the parameter helpers and the sine check out\n");
 
 	ret = smolalsa_open(&pcm, argc > 1 ? argv[1] : NULL, RATE, 1, PERIOD, PERIODS);
 	if (ret) {
