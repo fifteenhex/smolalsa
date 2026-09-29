@@ -39,6 +39,10 @@
 #define SMOLALSA_CAPTUREPATH	"/dev/snd/pcmC0D0c"
 #endif
 
+#ifndef SMOLALSA_CONTROLPATH
+#define SMOLALSA_CONTROLPATH	"/dev/snd/controlC0"
+#endif
+
 /* How long the blocking helpers will sit on a card before giving up on it */
 #ifndef SMOLALSA_WAITMS
 #define SMOLALSA_WAITMS		1000
@@ -540,6 +544,176 @@ static inline long smolalsa_delay(struct smolalsa_pcm *pcm)
 static inline unsigned int smolalsa_xruns(struct smolalsa_pcm *pcm)
 {
 	return pcm->xruns;
+}
+
+/*
+ * The mixer. Everything a card lets anyone change is an element: a switch, a
+ * number, or one of a list of names. Elements are found by name, and the
+ * kernel does that lookup itself as long as the numeric id is left at zero.
+ */
+struct smolalsa_ctl {
+	int fd;
+	unsigned int count;		/* elements the card had when opened */
+};
+
+struct smolalsa_ctl_elem {
+	struct snd_ctl_elem_id id;	/* numeric id, interface, name, index */
+	int type;			/* SNDRV_CTL_ELEM_TYPE_* */
+	unsigned int access;
+	unsigned int count;		/* values, one per channel */
+	long min, max, step;		/* numbers */
+	unsigned int items;		/* names, if it is a list of them */
+};
+
+static inline const char *smolalsa_ctl_typename(int type)
+{
+	switch (type) {
+	case SNDRV_CTL_ELEM_TYPE_BOOLEAN:	return "BOOLEAN";
+	case SNDRV_CTL_ELEM_TYPE_INTEGER:	return "INTEGER";
+	case SNDRV_CTL_ELEM_TYPE_ENUMERATED:	return "ENUMERATED";
+	case SNDRV_CTL_ELEM_TYPE_BYTES:		return "BYTES";
+	case SNDRV_CTL_ELEM_TYPE_IEC958:	return "IEC958";
+	case SNDRV_CTL_ELEM_TYPE_INTEGER64:	return "INTEGER64";
+	default:				return "NONE";
+	}
+}
+
+static inline void smolalsa_ctl_close(struct smolalsa_ctl *ctl)
+{
+	if (ctl->fd >= 0)
+		close(ctl->fd);
+
+	ctl->fd = -1;
+}
+
+/* How many elements the card has: ask for none of them and read the count */
+static inline int smolalsa_ctl_count(struct smolalsa_ctl *ctl, unsigned int *count)
+{
+	struct snd_ctl_elem_list list;
+
+	memset(&list, 0, sizeof(list));
+
+	if (ioctl(ctl->fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0)
+		return -errno;
+
+	*count = list.count;
+
+	return 0;
+}
+
+static inline int smolalsa_ctl_open(struct smolalsa_ctl *ctl, const char *path)
+{
+	int fd, ret;
+
+	memset(ctl, 0, sizeof(*ctl));
+	ctl->fd = -1;
+
+	if (!path)
+		path = SMOLALSA_CONTROLPATH;
+
+	fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return errno == EBUSY ? SMOLALSA_BUSY : SMOLALSA_NODEVICE;
+
+	ctl->fd = fd;
+
+	ret = smolalsa_ctl_count(ctl, &ctl->count);
+	if (ret < 0) {
+		smolalsa_ctl_close(ctl);
+		return ret;
+	}
+
+	return 0;
+}
+
+/*
+ * Fill in up to max element ids, and say how many that was and how many there
+ * are. Nothing here allocates, so the caller brings the room.
+ */
+static inline int smolalsa_ctl_list(struct smolalsa_ctl *ctl, struct snd_ctl_elem_id *ids,
+				    unsigned int max, unsigned int *used,
+				    unsigned int *total)
+{
+	struct snd_ctl_elem_list list;
+
+	memset(&list, 0, sizeof(list));
+	memset(ids, 0, max * sizeof(*ids));
+	list.offset = 0;
+	list.space = max;
+	list.pids = ids;
+
+	if (ioctl(ctl->fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0)
+		return -errno;
+
+	if (used)
+		*used = list.used;
+	if (total)
+		*total = list.count;
+
+	return 0;
+}
+
+/* What an element is: its type, how many values it has, and what they may be */
+static inline int smolalsa_ctl_info(struct smolalsa_ctl *ctl,
+				    const struct snd_ctl_elem_id *id,
+				    struct smolalsa_ctl_elem *elem)
+{
+	struct snd_ctl_elem_info info;
+
+	memset(&info, 0, sizeof(info));
+	info.id = *id;
+
+	if (ioctl(ctl->fd, SNDRV_CTL_IOCTL_ELEM_INFO, &info) < 0)
+		return -errno;
+
+	memset(elem, 0, sizeof(*elem));
+	elem->id = info.id;
+	elem->type = info.type;
+	elem->access = info.access;
+	elem->count = info.count;
+
+	if (info.type == SNDRV_CTL_ELEM_TYPE_INTEGER ||
+	    info.type == SNDRV_CTL_ELEM_TYPE_BOOLEAN) {
+		elem->min = info.value.integer.min;
+		elem->max = info.value.integer.max;
+		elem->step = info.value.integer.step;
+	}
+
+	if (info.type == SNDRV_CTL_ELEM_TYPE_ENUMERATED)
+		elem->items = info.value.enumerated.items;
+
+	return 0;
+}
+
+/*
+ * Find an element by name on a given interface. The kernel matches on the
+ * name whenever the numeric id is zero, so this is one ioctl rather than a
+ * walk of the list, and the numeric id comes back filled in.
+ */
+static inline int smolalsa_ctl_find_iface(struct smolalsa_ctl *ctl, int iface,
+					  const char *name, unsigned int index,
+					  struct smolalsa_ctl_elem *elem)
+{
+	struct snd_ctl_elem_id id;
+	unsigned int len = (unsigned int)strlen(name);
+
+	if (len >= sizeof(id.name))
+		return -EINVAL;
+
+	memset(&id, 0, sizeof(id));
+	id.numid = 0;
+	id.iface = iface;
+	id.index = index;
+	memcpy(id.name, name, len);
+
+	return smolalsa_ctl_info(ctl, &id, elem);
+}
+
+/* The mixer interface at index 0, which is what a name on its own means */
+static inline int smolalsa_ctl_find(struct smolalsa_ctl *ctl, const char *name,
+				    struct smolalsa_ctl_elem *elem)
+{
+	return smolalsa_ctl_find_iface(ctl, SNDRV_CTL_ELEM_IFACE_MIXER, name, 0, elem);
 }
 
 /* A WAV file. Only 16 bit PCM, since that is what the card is set to. */

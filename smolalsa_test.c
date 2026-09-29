@@ -276,6 +276,7 @@ static void check_time(void)
 static void check_nodevice(void)
 {
 	struct smolalsa_pcm pcm;
+	struct smolalsa_ctl ctl;
 
 	CHECK(smolalsa_open(&pcm, "/dev/snd/smolalsa-no-such-card", RATE, 1, PERIOD,
 			    PERIODS) == SMOLALSA_NODEVICE);
@@ -287,6 +288,10 @@ static void check_nodevice(void)
 	CHECK(smolalsa_write(&pcm, "xx", 1) == 0);
 	CHECK(smolalsa_read(&pcm, &pcm, 1) == 0);
 	CHECK(smolalsa_wait(&pcm, 0) == 0);
+
+	CHECK(smolalsa_ctl_open(&ctl, "/dev/snd/smolalsa-no-such-card") ==
+	      SMOLALSA_NODEVICE);
+	CHECK(ctl.fd == -1);
 }
 
 /* A square wave that fades, which is a beep and needs no arithmetic */
