@@ -159,6 +159,24 @@ static inline int smolalsa_prepare(struct smolalsa_pcm *pcm)
 	return 0;
 }
 
+/* Stop where it is and drop whatever had not been played or picked up yet */
+static inline int smolalsa_drop(struct smolalsa_pcm *pcm)
+{
+	if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_DROP, 0) < 0)
+		return -errno;
+
+	return 0;
+}
+
+/* Let what is queued play out and then stop, which here returns straight away */
+static inline int smolalsa_drain(struct smolalsa_pcm *pcm)
+{
+	if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_DRAIN, 0) < 0)
+		return -errno;
+
+	return 0;
+}
+
 /*
  * Open a card for playing, signed 16 bit interleaved, and tell it what to
  * expect.
