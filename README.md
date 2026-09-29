@@ -102,6 +102,12 @@ to, where it has got to every second, and finishes with `frames`, `elapsed ms`,
 `expected ms` and `xruns`: elapsed against expected is how the card's pacing is
 checked, since the two should be within a period or so of each other.
 
+`smolalsa_rec [-d dev] [-r rate] [-c channels] [-p period-frames] [-n periods]
+[-s seconds] [-R] out.wav` records to a WAV, or to raw samples with `-R`. Every
+second it says the loudest sample of that second and a checksum of everything
+so far, which is what tells a quiet room from a dead input, and it ends with
+the same timing line.
+
 ## Building it
 
 Both builds are `smolcommon.mk`'s. `make` on its own builds all five against
