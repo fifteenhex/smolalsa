@@ -141,6 +141,7 @@ static void fill(int16_t *frames, unsigned int n, unsigned int at, unsigned int 
 int main(int argc, char **argv, char **envp)
 {
 	struct smolalsa_pcm pcm;
+	struct smolalsa_state state = { 0 };
 	static int16_t frames[PERIOD];
 	unsigned int total = RATE * SECONDS, at = 0;
 	int ret;
@@ -188,7 +189,10 @@ int main(int argc, char **argv, char **envp)
 		at += (unsigned int)ret;
 	}
 
-	printf("beeped %u frames, ran dry %u times\n", at, smolalsa_xruns(&pcm));
+	smolalsa_status(&pcm, &state);
+
+	printf("beeped %u frames, ran dry %u times, and the card ended up %s\n", at,
+	       smolalsa_xruns(&pcm), smolalsa_statename(state.state));
 
 	smolalsa_close(&pcm);
 

@@ -350,6 +350,79 @@ static inline int smolalsa_write_all(struct smolalsa_pcm *pcm, const void *frame
 	return (int)done;
 }
 
+struct smolalsa_state {
+	int state;			/* SNDRV_PCM_STATE_* */
+	unsigned long hwptr;		/* frames the card has been through */
+	unsigned long applptr;		/* frames handed over */
+	unsigned long avail;		/* room to write, or frames to read */
+	long delay;			/* frames still to come out */
+};
+
+static inline const char *smolalsa_statename(int state)
+{
+	switch (state) {
+	case SNDRV_PCM_STATE_OPEN:		return "open";
+	case SNDRV_PCM_STATE_SETUP:		return "setup";
+	case SNDRV_PCM_STATE_PREPARED:		return "prepared";
+	case SNDRV_PCM_STATE_RUNNING:		return "running";
+	case SNDRV_PCM_STATE_XRUN:		return "xrun";
+	case SNDRV_PCM_STATE_DRAINING:		return "draining";
+	case SNDRV_PCM_STATE_PAUSED:		return "paused";
+	case SNDRV_PCM_STATE_SUSPENDED:		return "suspended";
+	case SNDRV_PCM_STATE_DISCONNECTED:	return "disconnected";
+	default:				return "?";
+	}
+}
+
+/*
+ * Where the card has got to. Both pointers count frames since the stream was
+ * prepared and wrap at pcm->boundary, so hw_ptr against what was handed over
+ * says whether the card is keeping up without timing anything.
+ */
+static inline int smolalsa_status(struct smolalsa_pcm *pcm, struct smolalsa_state *state)
+{
+	struct snd_pcm_status status;
+	int ret;
+
+	memset(&status, 0, sizeof(status));
+
+	ret = ioctl(pcm->fd, SNDRV_PCM_IOCTL_STATUS, &status);
+	if (ret < 0)
+		return -errno;
+
+	state->state = status.state;
+	state->hwptr = (unsigned long)status.hw_ptr;
+	state->applptr = (unsigned long)status.appl_ptr;
+	state->avail = (unsigned long)status.avail;
+	state->delay = (long)status.delay;
+
+	return 0;
+}
+
+/* Frames that can go in now, or that are waiting to be taken out */
+static inline long smolalsa_avail(struct smolalsa_pcm *pcm)
+{
+	struct smolalsa_state state;
+	int ret;
+
+	ret = smolalsa_status(pcm, &state);
+	if (ret < 0)
+		return ret;
+
+	return (long)state.avail;
+}
+
+/* Frames between what has been handed over and what has come out of the card */
+static inline long smolalsa_delay(struct smolalsa_pcm *pcm)
+{
+	snd_pcm_sframes_t frames = 0;
+
+	if (ioctl(pcm->fd, SNDRV_PCM_IOCTL_DELAY, &frames) < 0)
+		return -errno;
+
+	return (long)frames;
+}
+
 /* Times the card has run dry, or over, since it was opened */
 static inline unsigned int smolalsa_xruns(struct smolalsa_pcm *pcm)
 {
