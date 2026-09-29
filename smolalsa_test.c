@@ -188,6 +188,24 @@ static void check_sine(void)
 	}
 }
 
+static void check_time(void)
+{
+	unsigned long then, now;
+
+	CHECK(smolalsa_frames_ms(48000, 48000) == 1000);
+	CHECK(smolalsa_frames_ms(48000, 24000) == 500);
+	CHECK(smolalsa_frames_ms(44100, 44100 * 3) == 3000);
+	CHECK(smolalsa_frames_ms(48000, 0) == 0);
+	CHECK(smolalsa_frames_ms(0, 48000) == 0);
+	/* ten minutes, which is where multiplying first would have wrapped */
+	CHECK(smolalsa_frames_ms(48000, 48000ul * 600) == 600000);
+
+	then = smolalsa_now_ms();
+	now = smolalsa_now_ms();
+	CHECK(then != 0);
+	CHECK(now >= then);
+}
+
 /* Nothing there is its own answer, and it leaves nothing open */
 static void check_nodevice(void)
 {
@@ -228,6 +246,7 @@ int main(int argc, char **argv, char **envp)
 	check_ioctls();
 	check_params();
 	check_sine();
+	check_time();
 	check_nodevice();
 
 	if (failures) {
@@ -235,7 +254,7 @@ int main(int argc, char **argv, char **envp)
 		return 1;
 	}
 
-	printf("the structures, the parameter helpers and the sine check out\n");
+	printf("the structures, the parameter helpers, the sine and the clock check out\n");
 
 	ret = smolalsa_open(&pcm, argc > 1 ? argv[1] : NULL, RATE, 1, PERIOD, PERIODS);
 	if (ret) {
